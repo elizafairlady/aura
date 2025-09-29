@@ -198,6 +198,14 @@ class NewGenerationMixin(GenerationMixin):
         # if decoder-only then inputs_tensor has to be `input_ids`
         input_ids = inputs_tensor
 
+        # Expand inputs depending on the generation mode
+        input_ids, model_kwargs = self._expand_inputs_for_generation(
+            input_ids=input_ids,
+            expand_size=generation_config.num_return_sequences,
+            is_encoder_decoder=self.config.is_encoder_decoder,
+            **model_kwargs,
+        )
+
         # 6. Prepare `max_length` depending on other stopping criteria.
         input_ids_length = input_ids.shape[-1]
         has_default_max_length = kwargs.get("max_length") is None and generation_config.max_length is not None
@@ -225,7 +233,7 @@ class NewGenerationMixin(GenerationMixin):
         ):
             max_cache_length += inputs_tensor.shape[1]
         self._prepare_cache_for_generation(
-            generation_config, model_kwargs, assistant_model, batch_size, max_cache_length, device
+            generation_config, model_kwargs, assistant_model, batch_size, max_cache_length
         )
 
         if self.device.type != input_ids.device.type:
@@ -255,14 +263,6 @@ class NewGenerationMixin(GenerationMixin):
 
         # Set model_kwargs `use_cache` so we can use it later in forward runs
         model_kwargs["use_cache"] = generation_config.use_cache
-
-        # 12. expand input_ids with `num_return_sequences` additional sequences per batch
-        input_ids, model_kwargs = self._expand_inputs_for_generation(
-            input_ids=input_ids,
-            expand_size=generation_config.num_return_sequences,
-            is_encoder_decoder=self.config.is_encoder_decoder,
-            **model_kwargs,
-        )
 
         # 13. run sample
         return self.sample_stream(
