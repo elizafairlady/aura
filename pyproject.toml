@@ -146,6 +146,8 @@ docs = [
     "sphinx_inline_tabs>=2023.4.21",
     "sphinx_copybutton>=0.5.2",
     "linkify-it-py>=2.0.3",
+    "click_extra[sphinx]>=7.3.0",  # Converts Github Markdown admonitions
+
 ]
 
 [project.urls]

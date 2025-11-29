@@ -228,6 +228,10 @@ From version 0.27.0 you can [cache cloned
 voices](https://coqui-tts.readthedocs.io/en/latest/cloning.html) with a custom
 `speaker` ID, so you only need to pass audio files in `speaker_wav` once.
 
+> [!NOTE]
+> For more control or additional outputs, e.g. timestamps, use the lower-level
+> [Synthesizer API](https://coqui-tts.readthedocs.io/en/latest/main_classes/synthesizer.html).
+
 #### Single speaker model
 
 ```python
