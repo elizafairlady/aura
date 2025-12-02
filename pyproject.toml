@@ -140,12 +140,14 @@ dev = [
 ]
 # Dependencies for building the documentation
 docs = [
-    "furo>=2024.8.6",
-    "myst-parser==3.0.1",
-    "sphinx==7.4.7",
+    "furo>=2025.9.25",
+    "myst-parser==4.0.1",
+    "sphinx==8.1.3",
     "sphinx_inline_tabs>=2023.4.21",
     "sphinx_copybutton>=0.5.2",
     "linkify-it-py>=2.0.3",
+    "click_extra[sphinx]>=7.3.0",  # Converts Github Markdown admonitions
+
 ]
 
 [project.urls]
