@@ -118,7 +118,9 @@ You can also help us implement more models.
 ## Installation
 
 🐸TTS is tested on Ubuntu 24.04 with **python >= 3.10, < 3.14**, but should also
-work on Mac and Windows.
+work on Mac and Windows. Depending on your platform, you might first want to
+separately install Pytorch, `torchaudio`, and `torchcodec` with their
+[official instructions](https://pytorch.org/get-started/locally/).
 
 If you are only interested in [synthesizing speech](https://coqui-tts.readthedocs.io/en/latest/inference.html) with the pretrained 🐸TTS models, installing from PyPI is the easiest option.
 
@@ -141,6 +143,7 @@ The following extras allow the installation of optional dependencies:
 | Name | Description |
 |------|-------------|
 | `all` | All optional dependencies |
+| `codec` | Installs torchcodec needed with Pytorch>=2.9 |
 | `notebooks` | Dependencies only used in notebooks |
 | `server` | Dependencies to run the TTS server |
 | `bn` | Bangla G2P |
