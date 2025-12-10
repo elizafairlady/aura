@@ -7,6 +7,7 @@ from torch.nn import Conv1d, ConvTranspose1d
 from torch.nn import functional as F
 from torch.nn.utils.parametrizations import weight_norm
 from torch.nn.utils.parametrize import remove_parametrizations
+from torch.utils.checkpoint import checkpoint
 from trainer.io import load_fsspec
 
 logger = logging.getLogger(__name__)
@@ -180,6 +181,7 @@ class HifiganGenerator(torch.nn.Module):
         conv_post_bias=True,
         cond_in_each_up_layer=False,
         pre_linear=None,
+        use_grad_checkpointing=False,
     ):
         r"""HiFiGAN Generator with Multi-Receptive Field Fusion (MRF)
 
@@ -206,6 +208,7 @@ class HifiganGenerator(torch.nn.Module):
         self.num_kernels = len(resblock_kernel_sizes)
         self.num_upsamples = len(upsample_factors)
         self.cond_in_each_up_layer = cond_in_each_up_layer
+        self.use_grad_checkpointing = use_grad_checkpointing
 
         # initial upsampling layers
         if pre_linear is not None:
@@ -249,6 +252,23 @@ class HifiganGenerator(torch.nn.Module):
                 ch = upsample_initial_channel // (2 ** (i + 1))
                 self.conds.append(nn.Conv1d(cond_channels, ch, 1))
 
+    def _upsample_block(self, o, i, g=None):
+        """Single upsampling block with residual connections."""
+        o = F.leaky_relu(o, LRELU_SLOPE)
+        o = self.ups[i](o)
+
+        if self.cond_in_each_up_layer and g is not None:
+            o = o + self.conds[i](g)
+
+        z_sum = None
+        for j in range(self.num_kernels):
+            if z_sum is None:
+                z_sum = self.resblocks[i * self.num_kernels + j](o)
+            else:
+                z_sum += self.resblocks[i * self.num_kernels + j](o)
+        o = z_sum / self.num_kernels
+        return o
+
     def forward(self, x, g=None):
         """
         Args:
@@ -268,20 +288,15 @@ class HifiganGenerator(torch.nn.Module):
         o = self.conv_pre(x)
         if hasattr(self, "cond_layer"):
             o = o + self.cond_layer(g)
+        
+        # Apply gradient checkpointing during training if enabled
         for i in range(self.num_upsamples):
-            o = F.leaky_relu(o, LRELU_SLOPE)
-            o = self.ups[i](o)
-
-            if self.cond_in_each_up_layer:
-                o = o + self.conds[i](g)
-
-            z_sum = None
-            for j in range(self.num_kernels):
-                if z_sum is None:
-                    z_sum = self.resblocks[i * self.num_kernels + j](o)
-                else:
-                    z_sum += self.resblocks[i * self.num_kernels + j](o)
-            o = z_sum / self.num_kernels
+            if self.use_grad_checkpointing and self.training:
+                # Use checkpoint to reduce memory at cost of recomputation
+                o = checkpoint(self._upsample_block, o, i, g, use_reentrant=False)
+            else:
+                o = self._upsample_block(o, i, g)
+        
         o = F.leaky_relu(o)
         o = self.conv_post(o)
         o = torch.tanh(o)

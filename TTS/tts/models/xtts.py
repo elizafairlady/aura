@@ -2,9 +2,10 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator, List
 
 import librosa
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torchaudio
@@ -18,6 +19,8 @@ from TTS.tts.layers.xtts.stream_generator import init_stream_support
 from TTS.tts.layers.xtts.tokenizer import VoiceBpeTokenizer, split_sentence
 from TTS.tts.layers.xtts.xtts_manager import LanguageManager, SpeakerManager
 from TTS.tts.models.base_tts import BaseTTS
+from TTS.tts.models.xtts_cache import CacheManager
+from TTS.tts.models.xtts_utils import smart_chunk_text
 from TTS.utils.generic_utils import (
     is_pytorch_at_least_2_4,
     warn_synthesize_config_deprecated,
@@ -195,7 +198,7 @@ class Xtts(BaseTTS):
         >>> model.load_checkpoint(config, checkpoint_dir="paths/to/models_dir/", eval=True)
     """
 
-    def __init__(self, config: Coqpit):
+    def __init__(self, config: Coqpit, enable_cache: bool = True):
         super().__init__(config, ap=None, tokenizer=None)
         self.mel_stats_path = None
         self.config = config
@@ -208,6 +211,9 @@ class Xtts(BaseTTS):
         self.gpt = None
         self.init_models()
         self.register_buffer("mel_stats", torch.ones(80))
+        
+        # Initialize cache manager for optimizations
+        self.cache_manager = CacheManager() if enable_cache else None
 
     def init_models(self):
         """Initialize the models. We do it here since we need to load the tokenizer first."""
@@ -337,6 +343,7 @@ class Xtts(BaseTTS):
         librosa_trim_db: int | None = None,
         sound_norm_refs: bool = False,
         load_sr: int = 22050,
+        use_cache: bool = True,
     ):
         """Get the conditioning latents for the GPT model from the given audio.
 
@@ -348,12 +355,20 @@ class Xtts(BaseTTS):
             librosa_trim_db (int, optional): Trim the audio using this value. If None, not trimming. Defaults to None.
             sound_norm_refs (bool, optional): Whether to normalize the audio. Defaults to False.
             load_sr (int, optional): Sample rate to load the audio. Defaults to 22050.
+            use_cache (bool, optional): Whether to use cached embeddings. Defaults to True.
         """
         # deal with multiples references
         if not isinstance(audio_path, list):
             audio_paths = [audio_path]
         else:
             audio_paths = audio_path
+
+        # Try to use cache for single audio file (caching multiple files is more complex)
+        if use_cache and self.cache_manager and len(audio_paths) == 1:
+            cached = self.cache_manager.get_speaker_embedding(audio_paths[0])
+            if cached is not None:
+                gpt_cond_latent, speaker_embedding = cached
+                return gpt_cond_latent.to(self.device), speaker_embedding.to(self.device)
 
         speaker_embeddings = []
         audios = []
@@ -381,6 +396,12 @@ class Xtts(BaseTTS):
         if speaker_embeddings:
             speaker_embedding = torch.stack(speaker_embeddings)
             speaker_embedding = speaker_embedding.mean(dim=0)
+
+        # Save to cache for single audio file
+        if use_cache and self.cache_manager and len(audio_paths) == 1:
+            self.cache_manager.save_speaker_embedding(
+                audio_paths[0], gpt_cond_latents, speaker_embedding
+            )
 
         return gpt_cond_latents, speaker_embedding
 
@@ -587,6 +608,102 @@ class Xtts(BaseTTS):
         wav_overlap = wav_gen[-overlap_len:]
         wav_gen_prev = wav_gen
         return wav_chunk, wav_gen_prev, wav_overlap
+
+    @torch.inference_mode()
+    def tts_streaming(
+        self,
+        text: str,
+        speaker_wav: str | os.PathLike[Any] | list[str | os.PathLike[Any]],
+        language: str,
+        # Chunking parameters
+        max_tokens_per_chunk: int = 150,
+        # Voice cloning parameters
+        max_ref_length: int = 30,
+        gpt_cond_len: int = 6,
+        gpt_cond_chunk_len: int = 6,
+        # GPT inference parameters
+        temperature: float = 0.75,
+        length_penalty: float = 1.0,
+        repetition_penalty: float = 10.0,
+        top_k: int = 50,
+        top_p: float = 0.85,
+        speed: float = 1.0,
+        **kwargs
+    ) -> Generator[np.ndarray, None, None]:
+        """
+        Stream TTS synthesis by processing text in chunks and yielding audio immediately.
+        
+        This method provides optimized streaming synthesis:
+        - Computes speaker embedding once and caches it
+        - Splits text into smart chunks at sentence boundaries
+        - Yields audio chunks as they're generated (low latency)
+        - Uses caching for repeated speakers
+        
+        Args:
+            text: Input text to synthesize
+            speaker_wav: Path(s) to reference audio file(s)
+            language: Language code (e.g., "en", "es", "fr")
+            max_tokens_per_chunk: Maximum tokens per text chunk (~150 tokens = ~4 seconds)
+            max_ref_length: Maximum reference audio length in seconds
+            gpt_cond_len: GPT conditioning length in seconds
+            gpt_cond_chunk_len: GPT conditioning chunk length
+            temperature: Sampling temperature
+            length_penalty: Length penalty for generation
+            repetition_penalty: Repetition penalty
+            top_k: Top-k sampling parameter
+            top_p: Top-p (nucleus) sampling parameter
+            speed: Speech speed multiplier
+            **kwargs: Additional arguments
+            
+        Yields:
+            Audio chunks as numpy arrays (waveform at 24kHz)
+            
+        Example:
+            >>> model = Xtts.init_from_config(config)
+            >>> model.load_checkpoint(config, checkpoint_dir="path/to/model")
+            >>> for audio_chunk in model.tts_streaming(
+            ...     text="Hello world. This is a test.",
+            ...     speaker_wav="speaker.wav",
+            ...     language="en"
+            ... ):
+            ...     # Process or save audio_chunk immediately
+            ...     print(f"Generated chunk of {len(audio_chunk)} samples")
+        """
+        # Compute speaker embedding once (with caching)
+        gpt_cond_latent, speaker_embedding = self.get_conditioning_latents(
+            audio_path=speaker_wav,
+            max_ref_length=max_ref_length,
+            gpt_cond_len=gpt_cond_len,
+            gpt_cond_chunk_len=gpt_cond_chunk_len,
+            use_cache=True,
+        )
+        
+        # Split text into smart chunks
+        text_chunks = smart_chunk_text(text, max_tokens=max_tokens_per_chunk, language=language)
+        
+        # Process each chunk and yield audio immediately
+        for chunk in text_chunks:
+            if not chunk.strip():
+                continue
+                
+            # Generate audio for this chunk
+            result = self.inference(
+                text=chunk,
+                language=language,
+                gpt_cond_latent=gpt_cond_latent,
+                speaker_embedding=speaker_embedding,
+                temperature=temperature,
+                length_penalty=length_penalty,
+                repetition_penalty=repetition_penalty,
+                top_k=top_k,
+                top_p=top_p,
+                speed=speed,
+                enable_text_splitting=False,  # We already chunked
+                **kwargs
+            )
+            
+            # Yield the audio chunk immediately
+            yield result["wav"]
 
     @torch.inference_mode()
     def inference_stream(
