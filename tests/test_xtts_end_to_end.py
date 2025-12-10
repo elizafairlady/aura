@@ -41,26 +41,9 @@ def test_end_to_end_with_model():
         print("✓ Imports successful")
         
         print("\n[2/7] Checking for model files...")
-        # Try to find XTTS model - check multiple possible locations
-        possible_paths = [
-            "models/xtts-v2",
-            os.path.expanduser("~/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2"),
-        ]
         
-        model_path = None
-        for path in possible_paths:
-            if os.path.exists(path):
-                model_path = path
-                break
-        
-        if model_path is None:
-            print(f"⚠ Model not found. Tried:")
-            for path in possible_paths:
-                print(f"  - {path}")
-            print("  Please specify the correct model path")
-            return False
-        print(f"✓ Model found at {model_path}")
-        
+        model_path = "models/xtts-v2"
+
         print("\n[3/7] Loading XTTS model with cache enabled...")
         config = XttsConfig()
         config.load_json(os.path.join(model_path, "config.json"))

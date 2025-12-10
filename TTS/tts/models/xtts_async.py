@@ -290,6 +290,42 @@ class AsyncTTSPipeline:
         """Context manager exit."""
         self.stop()
     
+    def synthesize_streaming(
+        self,
+        text: str,
+        speaker_wav: str,
+        language: str,
+        **kwargs
+    ):
+        """
+        Stream audio chunks as they're generated.
+        
+        This is a convenience method that directly calls the model's tts_streaming
+        and yields chunks to the caller.
+        
+        Args:
+            text: Input text to synthesize
+            speaker_wav: Path to speaker reference audio
+            language: Language code
+            **kwargs: Additional synthesis parameters
+            
+        Yields:
+            Audio chunks (numpy arrays) as they're generated
+            
+        Example:
+            >>> pipeline = AsyncTTSPipeline(model)
+            >>> for chunk in pipeline.synthesize_streaming("Hello", "speaker.wav", "en"):
+            ...     print(f"Got chunk: {len(chunk)} samples")
+        """
+        # Directly yield from the model's streaming generator
+        for chunk in self.model.tts_streaming(
+            text=text,
+            speaker_wav=speaker_wav,
+            language=language,
+            **kwargs
+        ):
+            yield chunk
+    
     def __del__(self):
         """Cleanup when object is destroyed."""
         try:
