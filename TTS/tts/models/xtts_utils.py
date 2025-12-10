@@ -15,8 +15,9 @@ def smart_chunk_text(text: str, max_tokens: int = 150, language: str = "en", tok
     Split text into chunks at sentence boundaries.
     
     This ensures that:
-    - Each chunk is approximately max_tokens tokens long (~4 seconds of speech)
-    - Chunks split at sentence boundaries (., !, ?) when possible
+    - Text is ALWAYS split at sentence boundaries (., !, ?)
+    - Respects honorifics like "Mrs.", "Dr.", "Sr." etc.
+    - Respects decimal numbers like "0.7.0", "3.14" etc.
     - No text is lost in the chunking process
     - Punctuation is preserved with the chunk it belongs to
     
@@ -27,84 +28,23 @@ def smart_chunk_text(text: str, max_tokens: int = 150, language: str = "en", tok
         tokenizer: Optional tokenizer for accurate token counting
         
     Returns:
-        List of text chunks
+        List of text chunks (one per sentence)
     """
     if not text or not text.strip():
         return []
-    
-    # Use actual tokenizer if available for accurate token counting
-    def count_tokens(s: str) -> int:
-        if tokenizer is not None:
-            try:
-                return len(tokenizer.encode(s, lang=language))
-            except:
-                pass
-        # Fallback: ~3-4 characters per token (conservative estimate)
-        return len(s) // 3
-    
-    # If text is short enough, return as single chunk
-    if count_tokens(text) <= max_tokens:
-        return [text.strip()]
     
     # Split on sentence boundaries
     # This regex handles:
     # - Periods, exclamation marks, question marks
     # - Avoids splitting on common abbreviations like "Dr.", "Mr.", "Mrs.", "Ms.", "Jr.", "Sr."
-    # - Avoids splitting on decimal numbers like "3.14"
+    # - Avoids splitting on decimal numbers like "3.14" or version numbers like "0.7.0"
     sentence_endings = r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<![A-Z]\.)(?<=\.|\?|\!)\s+'
     
     # Split into sentences
     sentences = re.split(sentence_endings, text)
     
-    chunks = []
-    current_chunk = ""
-    
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-        
-        # Check token count for adding this sentence
-        test_chunk = (current_chunk + " " + sentence) if current_chunk else sentence
-        
-        if count_tokens(test_chunk) <= max_tokens:
-            current_chunk = test_chunk
-        else:
-            # Current chunk is full, save it and start new chunk
-            if current_chunk:
-                chunks.append(current_chunk)
-            
-            # If the sentence itself is longer than max_tokens, split it further
-            if count_tokens(sentence) > max_tokens:
-                # Split on commas or other punctuation
-                sub_parts = re.split(r'([,;:])\s+', sentence)
-                
-                # Reconstruct with punctuation
-                reconstructed = []
-                for i in range(0, len(sub_parts), 2):
-                    if i + 1 < len(sub_parts):
-                        reconstructed.append(sub_parts[i] + sub_parts[i + 1])
-                    else:
-                        reconstructed.append(sub_parts[i])
-                
-                temp_chunk = ""
-                for part in reconstructed:
-                    test_chunk = (temp_chunk + " " + part) if temp_chunk else part
-                    
-                    if count_tokens(test_chunk) <= max_tokens:
-                        temp_chunk = test_chunk
-                    else:
-                        if temp_chunk:
-                            chunks.append(temp_chunk)
-                        temp_chunk = part
-                
-                current_chunk = temp_chunk
-            else:
-                current_chunk = sentence
-    
-    # Don't forget the last chunk
-    if current_chunk:
-        chunks.append(current_chunk)
+    # Return sentences as-is, stripped of whitespace
+    chunks = [s.strip() for s in sentences if s.strip()]
     
     return chunks
 
