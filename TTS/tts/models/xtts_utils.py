@@ -10,7 +10,7 @@ import re
 from typing import List
 
 
-def smart_chunk_text(text: str, max_tokens: int = 150, language: str = "en") -> List[str]:
+def smart_chunk_text(text: str, max_tokens: int = 150, language: str = "en", tokenizer=None) -> List[str]:
     """
     Split text into chunks at sentence boundaries.
     
@@ -24,6 +24,7 @@ def smart_chunk_text(text: str, max_tokens: int = 150, language: str = "en") -> 
         text: Input text to chunk
         max_tokens: Maximum tokens per chunk (default 150, approximately 4 seconds)
         language: Language code (used for language-specific splitting rules)
+        tokenizer: Optional tokenizer for accurate token counting
         
     Returns:
         List of text chunks
@@ -31,13 +32,18 @@ def smart_chunk_text(text: str, max_tokens: int = 150, language: str = "en") -> 
     if not text or not text.strip():
         return []
     
-    # Heuristic: estimate ~4 characters per token for most languages
-    # This is a rough estimate; actual tokenization may vary
-    chars_per_token = 4
-    max_chars = max_tokens * chars_per_token
+    # Use actual tokenizer if available for accurate token counting
+    def count_tokens(s: str) -> int:
+        if tokenizer is not None:
+            try:
+                return len(tokenizer.encode(s, lang=language))
+            except:
+                pass
+        # Fallback: ~3-4 characters per token (conservative estimate)
+        return len(s) // 3
     
     # If text is short enough, return as single chunk
-    if len(text) <= max_chars:
+    if count_tokens(text) <= max_tokens:
         return [text.strip()]
     
     # Split on sentence boundaries
@@ -58,19 +64,18 @@ def smart_chunk_text(text: str, max_tokens: int = 150, language: str = "en") -> 
         if not sentence:
             continue
         
-        # If adding this sentence keeps us under the limit, add it
-        if len(current_chunk) + len(sentence) + 1 <= max_chars:
-            if current_chunk:
-                current_chunk += " " + sentence
-            else:
-                current_chunk = sentence
+        # Check token count for adding this sentence
+        test_chunk = (current_chunk + " " + sentence) if current_chunk else sentence
+        
+        if count_tokens(test_chunk) <= max_tokens:
+            current_chunk = test_chunk
         else:
             # Current chunk is full, save it and start new chunk
             if current_chunk:
                 chunks.append(current_chunk)
             
-            # If the sentence itself is longer than max_chars, split it further
-            if len(sentence) > max_chars:
+            # If the sentence itself is longer than max_tokens, split it further
+            if count_tokens(sentence) > max_tokens:
                 # Split on commas or other punctuation
                 sub_parts = re.split(r'([,;:])\s+', sentence)
                 
@@ -84,11 +89,10 @@ def smart_chunk_text(text: str, max_tokens: int = 150, language: str = "en") -> 
                 
                 temp_chunk = ""
                 for part in reconstructed:
-                    if len(temp_chunk) + len(part) + 1 <= max_chars:
-                        if temp_chunk:
-                            temp_chunk += " " + part
-                        else:
-                            temp_chunk = part
+                    test_chunk = (temp_chunk + " " + part) if temp_chunk else part
+                    
+                    if count_tokens(test_chunk) <= max_tokens:
+                        temp_chunk = test_chunk
                     else:
                         if temp_chunk:
                             chunks.append(temp_chunk)
