@@ -615,8 +615,9 @@ class Xtts(BaseTTS):
         text: str,
         speaker_wav: str | os.PathLike[Any] | list[str | os.PathLike[Any]],
         language: str,
-        # Chunking parameters
-        max_tokens_per_chunk: int = 150,
+        # Streaming parameters
+        stream_chunk_size: int = 20,
+        overlap_wav_len: int = 1024,
         # Voice cloning parameters
         max_ref_length: int = 30,
         gpt_cond_len: int = 6,
@@ -631,19 +632,20 @@ class Xtts(BaseTTS):
         **kwargs
     ) -> Generator[np.ndarray, None, None]:
         """
-        Stream TTS synthesis by processing text in chunks and yielding audio immediately.
+        Stream TTS synthesis with TRUE token-by-token streaming.
         
-        This method provides optimized streaming synthesis:
-        - Computes speaker embedding once and caches it
-        - Splits text into smart chunks at sentence boundaries
-        - Yields audio chunks as they're generated (low latency)
-        - Uses caching for repeated speakers
+        This yields audio chunks as the GPT generates tokens in real-time,
+        providing the lowest possible latency for streaming applications.
+        
+        Unlike batch processing, this streams audio as soon as the model
+        generates each batch of tokens, without waiting for full text completion.
         
         Args:
             text: Input text to synthesize
             speaker_wav: Path(s) to reference audio file(s)
             language: Language code (e.g., "en", "es", "fr")
-            max_tokens_per_chunk: Maximum tokens per text chunk (~150 tokens = ~4 seconds)
+            stream_chunk_size: Number of tokens to generate before yielding audio
+            overlap_wav_len: Overlap length for smooth chunk transitions
             max_ref_length: Maximum reference audio length in seconds
             gpt_cond_len: GPT conditioning length in seconds
             gpt_cond_chunk_len: GPT conditioning chunk length
@@ -656,7 +658,7 @@ class Xtts(BaseTTS):
             **kwargs: Additional arguments
             
         Yields:
-            Audio chunks as numpy arrays (waveform at 24kHz)
+            Audio chunks as numpy arrays (waveform at 24kHz) as they're generated
             
         Example:
             >>> model = Xtts.init_from_config(config)
@@ -664,10 +666,11 @@ class Xtts(BaseTTS):
             >>> for audio_chunk in model.tts_streaming(
             ...     text="Hello world. This is a test.",
             ...     speaker_wav="speaker.wav",
-            ...     language="en"
+            ...     language="en",
+            ...     stream_chunk_size=20  # Yield audio every 20 tokens
             ... ):
-            ...     # Process or save audio_chunk immediately
-            ...     print(f"Generated chunk of {len(audio_chunk)} samples")
+            ...     # Audio arrives in real-time as model generates
+            ...    print(f"Received {len(audio_chunk)} audio samples")
         """
         # Compute speaker embedding once (with caching)
         gpt_cond_latent, speaker_embedding = self.get_conditioning_latents(
@@ -678,32 +681,25 @@ class Xtts(BaseTTS):
             use_cache=True,
         )
         
-        # Split text into smart chunks
-        text_chunks = smart_chunk_text(text, max_tokens=max_tokens_per_chunk, language=language)
-        
-        # Process each chunk and yield audio immediately
-        for chunk in text_chunks:
-            if not chunk.strip():
-                continue
-                
-            # Generate audio for this chunk
-            result = self.inference(
-                text=chunk,
-                language=language,
-                gpt_cond_latent=gpt_cond_latent,
-                speaker_embedding=speaker_embedding,
-                temperature=temperature,
-                length_penalty=length_penalty,
-                repetition_penalty=repetition_penalty,
-                top_k=top_k,
-                top_p=top_p,
-                speed=speed,
-                enable_text_splitting=False,  # We already chunked
-                **kwargs
-            )
-            
-            # Yield the audio chunk immediately
-            yield result["wav"]
+        # Use the real streaming inference that yields as GPT generates tokens
+        for audio_chunk in self.inference_stream(
+            text=text,
+            language=language,
+            gpt_cond_latent=gpt_cond_latent,
+            speaker_embedding=speaker_embedding,
+            stream_chunk_size=stream_chunk_size,
+            overlap_wav_len=overlap_wav_len,
+            temperature=temperature,
+            length_penalty=length_penalty,
+            repetition_penalty=repetition_penalty,
+            top_k=top_k,
+            top_p=top_p,
+            speed=speed,
+            enable_text_splitting=False,
+            **kwargs
+        ):
+            # Yield audio chunks as they're generated from the GPT token stream
+            yield audio_chunk.cpu().numpy()
 
     @torch.inference_mode()
     def inference_stream(
