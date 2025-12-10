@@ -618,6 +618,8 @@ class Xtts(BaseTTS):
         # Streaming parameters
         stream_chunk_size: int = 20,
         overlap_wav_len: int = 1024,
+        # Text chunking parameters
+        max_text_tokens: int = 250,  # Max tokens per text chunk to avoid warnings
         # Voice cloning parameters
         max_ref_length: int = 30,
         gpt_cond_len: int = 6,
@@ -632,20 +634,20 @@ class Xtts(BaseTTS):
         **kwargs
     ) -> Generator[np.ndarray, None, None]:
         """
-        Stream TTS synthesis with TRUE token-by-token streaming.
+        Stream TTS synthesis with smart text chunking + token-by-token streaming.
         
-        This yields audio chunks as the GPT generates tokens in real-time,
-        providing the lowest possible latency for streaming applications.
-        
-        Unlike batch processing, this streams audio as soon as the model
-        generates each batch of tokens, without waiting for full text completion.
+        This provides:
+        1. Smart text splitting at sentence boundaries (avoids character limit warnings)
+        2. Token-by-token streaming within each chunk (low latency)
+        3. Speaker embedding caching (faster repeated synthesis)
         
         Args:
             text: Input text to synthesize
             speaker_wav: Path(s) to reference audio file(s)
             language: Language code (e.g., "en", "es", "fr")
-            stream_chunk_size: Number of tokens to generate before yielding audio
-            overlap_wav_len: Overlap length for smooth chunk transitions
+            stream_chunk_size: Number of GPT tokens to generate before yielding audio
+            overlap_wav_len: Overlap length for smooth audio chunk transitions
+            max_text_tokens: Maximum text tokens per chunk (prevents character limit warnings)
             max_ref_length: Maximum reference audio length in seconds
             gpt_cond_len: GPT conditioning length in seconds
             gpt_cond_chunk_len: GPT conditioning chunk length
@@ -664,13 +666,12 @@ class Xtts(BaseTTS):
             >>> model = Xtts.init_from_config(config)
             >>> model.load_checkpoint(config, checkpoint_dir="path/to/model")
             >>> for audio_chunk in model.tts_streaming(
-            ...     text="Hello world. This is a test.",
+            ...     text="Very long text...",
             ...     speaker_wav="speaker.wav",
             ...     language="en",
-            ...     stream_chunk_size=20  # Yield audio every 20 tokens
+            ...     stream_chunk_size=20  # Audio yielded every 20 GPT tokens
             ... ):
-            ...     # Audio arrives in real-time as model generates
-            ...    print(f"Received {len(audio_chunk)} audio samples")
+            ...     print(f"Received {len(audio_chunk)} audio samples")
         """
         # Compute speaker embedding once (with caching)
         gpt_cond_latent, speaker_embedding = self.get_conditioning_latents(
@@ -681,25 +682,33 @@ class Xtts(BaseTTS):
             use_cache=True,
         )
         
-        # Use the real streaming inference that yields as GPT generates tokens
-        for audio_chunk in self.inference_stream(
-            text=text,
-            language=language,
-            gpt_cond_latent=gpt_cond_latent,
-            speaker_embedding=speaker_embedding,
-            stream_chunk_size=stream_chunk_size,
-            overlap_wav_len=overlap_wav_len,
-            temperature=temperature,
-            length_penalty=length_penalty,
-            repetition_penalty=repetition_penalty,
-            top_k=top_k,
-            top_p=top_p,
-            speed=speed,
-            enable_text_splitting=False,
-            **kwargs
-        ):
-            # Yield audio chunks as they're generated from the GPT token stream
-            yield audio_chunk.cpu().numpy()
+        # Split text into smart chunks at sentence boundaries to avoid character limit warnings
+        text_chunks = smart_chunk_text(text, max_tokens=max_text_tokens, language=language, tokenizer=self.tokenizer)
+        
+        # Stream each text chunk with token-by-token audio generation
+        for text_chunk in text_chunks:
+            if not text_chunk.strip():
+                continue
+                
+            # Use token-by-token streaming inference for this text chunk
+            for audio_chunk in self.inference_stream(
+                text=text_chunk,
+                language=language,
+                gpt_cond_latent=gpt_cond_latent,
+                speaker_embedding=speaker_embedding,
+                stream_chunk_size=stream_chunk_size,
+                overlap_wav_len=overlap_wav_len,
+                temperature=temperature,
+                length_penalty=length_penalty,
+                repetition_penalty=repetition_penalty,
+                top_k=top_k,
+                top_p=top_p,
+                speed=speed,
+                enable_text_splitting=False,
+                **kwargs
+            ):
+                # Yield audio chunks as they're generated from the GPT token stream
+                yield audio_chunk.cpu().numpy()
 
     @torch.inference_mode()
     def inference_stream(
